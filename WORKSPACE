@@ -500,6 +500,57 @@ http_archive(
     urls = ["https://github.com/espeak-ng/espeak-ng/archive/refs/tags/1.52.0.tar.gz"],
 )
 
+http_archive(
+    name = "cppjieba",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "cppjieba",
+    hdrs = glob([
+        "include/cppjieba/*.hpp",
+        "deps/limonp/include/limonp/*.hpp",
+    ]),
+    includes = [
+        "deps/limonp/include",
+        "include",
+    ],
+)
+""",
+    patch_cmds = [
+        """python3 -c '
+p = "include/cppjieba/DictTrie.hpp"
+s = open(p).read()
+needle = "  enum UserWordWeightOption {"
+addition = \"\"\"  struct PrecomputedDict {
+    std::vector<DictUnit> node_infos;
+    std::unordered_set<Rune> single_char_user_words;
+    double freq_sum;
+    double min_weight;
+    double max_weight;
+    double median_weight;
+  };
+  DictTrie(const PrecomputedDict& dict) {
+    static_node_infos_ = dict.node_infos;
+    user_dict_single_chinese_word_ = dict.single_char_user_words;
+    freq_sum_ = dict.freq_sum;
+    min_weight_ = dict.min_weight;
+    max_weight_ = dict.max_weight;
+    median_weight_ = dict.median_weight;
+    user_word_default_weight_ = median_weight_;
+    Shrink(static_node_infos_);
+    CreateTrie(static_node_infos_);
+  }
+\"\"\"
+assert needle in s, "DictTrie.hpp structure changed"
+open(p, "w").write(s.replace(needle, addition + needle, 1))
+'""",
+    ],
+    sha256 = "8b27931630abab1136b7c3ee920e4a95e78cb84a3cab4670198172bc82104844",
+    strip_prefix = "OpenCC-025f371dc76b598d77384fbdab90c937471844d8/plugins/jieba/deps/cppjieba",
+    urls = ["https://github.com/BYVoid/OpenCC/archive/025f371dc76b598d77384fbdab90c937471844d8.tar.gz"],
+)
+
 # Android rules ####################################################################################
 
 # Android SDK
