@@ -1,0 +1,49 @@
+# Mandarin Chinese text normalization for the TTS front end.
+#
+# Format is documented in omni/tts/text_normalizer.h. Records are
+# tab-separated, and `rule` records apply in the order they appear here.
+#
+# espeak-ng's `cmn` voice already reads cardinals correctly on its own
+# (123 -> 一百二十三, 下午3点30分 -> 下午三点三十分), so this table deliberately
+# does not touch them. It covers only what espeak-ng gets wrong:
+#   * readings that are digit-by-digit rather than cardinal (years),
+#   * the decimal point, which it drops entirely (3.14 -> 三一四),
+#   * symbols it drops (℃, ￥) or falls back to English for (% -> "percent").
+#
+# Ordering matters. Any rule that has to see a number in its original form must
+# come before the decimal rule, which rewrites digits into glyphs.
+
+digit	0	〇
+digit	1	一
+digit	2	二
+digit	3	三
+digit	4	四
+digit	5	五
+digit	6	六
+digit	7	七
+digit	8	八
+digit	9	九
+
+# Currency. The symbol precedes the amount but the Chinese unit follows it, so
+# these have to run while the amount is still a bare run of digits.
+rule	[￥¥]\s*(\d+(?:\.\d+)?)	\1元
+rule	\$\s*(\d+(?:\.\d+)?)	\1美元
+rule	€\s*(\d+(?:\.\d+)?)	\1欧元
+
+# Percent. Also a prefix in Chinese: 50% -> 百分之50 -> 百分之五十.
+rule	(\d+(?:\.\d+)?)\s*%	百分之\1
+
+# Temperature and angles.
+rule	(\d)\s*°C	\1摄氏度
+rule	(\d)\s*°F	\1华氏度
+rule	℃	摄氏度
+rule	℉	华氏度
+rule	(\d)\s*°	\1度
+
+# A four-digit year is read one digit at a time: 2026年 -> 二〇二六年.
+rule	(\d{4})\s*年	#1年
+
+# The fractional part of a decimal is read one digit at a time while the
+# integer part stays a cardinal: 3.14 -> 3点一四 -> 三点一四. This rewrites
+# digits into glyphs, so it must stay last.
+rule	(\d+)\.(\d+)	\1点#2
