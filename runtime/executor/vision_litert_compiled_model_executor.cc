@@ -85,6 +85,10 @@ constexpr absl::string_view kImages = "images";
 constexpr absl::string_view kVisionLengthPrefix = "vision_";
 // The features output tensor name for ViT encoder.
 constexpr absl::string_view kFeatures = "features";
+// Optional DeepStack features output of the encoder, [1, N, layers, dim].
+constexpr absl::string_view kDeepstackFeatures = "deepstack_features";
+// Optional M-RoPE (t, h, w) offsets output of the encoder, [1, N, 3].
+constexpr absl::string_view kMropeOffsets = "mrope_offsets";
 // The mask input tensor name for ViT encoder.
 constexpr absl::string_view kMask = "mask";
 // The patch position input tensor name for ViT encoder.
@@ -543,8 +547,28 @@ absl::StatusOr<ExecutorVisionData> VisionLiteRtCompiledModelExecutor::Encode(
           /*output_buffers=*/encoder_outputs));
     }
     AccumulateStat(latency_stats_, kVisionNumImagesMetric, int64_t{1});
-    return ExecutorVisionData(std::move(encoder_outputs[0]),
-                              /*per_layer_embeddings=*/std::nullopt);
+    // Encoders may have extra outputs besides the features (e.g. Qwen3-VL's
+    // DeepStack features and M-RoPE offsets), so pick outputs by name. The
+    // features fall back to the first output for single-output encoders.
+    LITERT_ASSIGN_OR_RETURN(
+        auto output_names,
+        vision_encoder_->GetModel().GetSignatureOutputNames(0));
+    auto output_index = [&](absl::string_view name) -> int {
+      for (int i = 0; i < output_names.size(); ++i) {
+        if (output_names[i] == name) return i;
+      }
+      return -1;
+    };
+    const int features_index = std::max(output_index(kFeatures), 0);
+    ExecutorVisionData vision_data(std::move(encoder_outputs[features_index]),
+                                   /*per_layer_embeddings=*/std::nullopt);
+    if (const int i = output_index(kDeepstackFeatures); i >= 0) {
+      vision_data.SetDeepstackEmbeddings(std::move(encoder_outputs[i]));
+    }
+    if (const int i = output_index(kMropeOffsets); i >= 0) {
+      vision_data.SetMropeOffsets(std::move(encoder_outputs[i]));
+    }
+    return vision_data;
   }
 
   LITERT_ASSIGN_OR_RETURN(

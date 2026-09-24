@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_LITERT_COMPILED_MODEL_EXECUTOR_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_LITERT_COMPILED_MODEL_EXECUTOR_H_
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -331,6 +332,21 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
       absl::flat_hash_map<absl::string_view, TensorBuffer>&
           prefill_output_buffers);
 
+  // Loads the DeepStack features and M-RoPE offsets of the vision tokens in
+  // `inputs`, to be consumed in order by the vision tokens of the prefill.
+  absl::Status LoadVisionTokenExtras(const ExecutorInputs& inputs);
+
+  // Drops the vision token extras loaded by LoadVisionTokenExtras().
+  void ClearVisionTokenExtras();
+
+  // Assigns the M-RoPE position of the token processed at `step` and, for a
+  // vision token, consumes its M-RoPE offset and DeepStack features. Tokens
+  // must be passed in processing order. `deepstack` is left empty for text
+  // tokens and when the model has no DeepStack input.
+  absl::Status NextTokenExtras(int token_id, int step,
+                               std::array<int32_t, 3>& mrope_position,
+                               absl::Span<const float>& deepstack);
+
   // Fills the input buffer from the unprocessed token.
   absl::Status FillInputBufferWithToken(
       const std::vector<std::shared_ptr<TokenData>>& unprocessed_token,
@@ -412,6 +428,15 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
 
   // The embedding lookup for the optional per layer embedder model.
   std::unique_ptr<EmbeddingLookupManager> per_layer_embedding_lookup_;
+
+  // Vision token extras of the current prefill (see LoadVisionTokenExtras):
+  // DeepStack features, [num_vision_tokens, deepstack_width] floats, and
+  // M-RoPE offsets, [num_vision_tokens, 3] floats, plus the index of the next
+  // vision token to consume.
+  std::vector<float> vision_deepstack_;
+  int vision_deepstack_width_ = 0;
+  std::vector<float> vision_mrope_offsets_;
+  int next_vision_token_ = 0;
 
   // Whether to use FP16 precision for the calculation.
   bool use_fp16_precision_;

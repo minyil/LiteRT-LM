@@ -17,6 +17,9 @@
 
 #include <cstddef>
 #include <memory>
+#include <array>
+#include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -48,6 +51,23 @@ class TokenData {
     return per_layer_embedding_;
   }
 
+  // DeepStack features of a vision token ([num_deepstack_layers * dim]);
+  // empty for text tokens.
+  absl::Span<const float> deepstack_embedding() const {
+    return deepstack_embedding_;
+  }
+  std::vector<float>& mutable_deepstack_embedding() {
+    return deepstack_embedding_;
+  }
+
+  // M-RoPE (t, h, w) position, assigned when the token's step is assigned.
+  const std::optional<std::array<int32_t, 3>>& mrope_position() const {
+    return mrope_position_;
+  }
+  void set_mrope_position(const std::array<int32_t, 3>& position) {
+    mrope_position_ = position;
+  }
+
  private:
   // The token id that is to be processed.
   const int id_;
@@ -57,6 +77,12 @@ class TokenData {
 
   // May contain the per-layer embedding corresponding to the token id.
   std::vector<float> per_layer_embedding_;
+
+  // May contain the DeepStack features of a vision token.
+  std::vector<float> deepstack_embedding_;
+
+  // M-RoPE position, only set for models with multimodal RoPE.
+  std::optional<std::array<int32_t, 3>> mrope_position_;
 };
 
 // Keeps track of processed tokens during the LLM execution.

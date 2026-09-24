@@ -351,6 +351,17 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::CreatePrefillInputBuffers(
   prefill_input_buffers[signatures_.input_positions] =
       std::move(positions_buffer);
 
+  // Point at the members: the buffer map is keyed by string_views of them.
+  for (const std::optional<std::string>* name :
+       {&signatures_.input_mrope_positions,
+        &signatures_.input_deepstack_embeddings}) {
+    if (!name->has_value()) continue;
+    LITERT_ASSIGN_OR_RETURN(
+        auto buffer,
+        compiled_model_->CreateInputBuffer(prefill_signature, **name));
+    prefill_input_buffers[**name] = std::move(buffer);
+  }
+
   if (signatures_.input_attn_mask.has_value()) {
     ABSL_ASSIGN_OR_RETURN(bool is_attn_dyn,
                           HasDynamicDim(*compiled_model_, prefill_signature,
@@ -514,6 +525,100 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::PrepareFirstPrefillAfterDecode(
   return absl::OkStatus();
 }
 
+absl::Status LlmLiteRtCompiledModelExecutorBase::LoadVisionTokenExtras(
+    const ExecutorInputs& inputs) {
+  ClearVisionTokenExtras();
+  if (!signatures_.input_mrope_positions.has_value() &&
+      !signatures_.input_deepstack_embeddings.has_value()) {
+    return absl::OkStatus();
+  }
+  auto vision_data = inputs.GetVisionDataPtr();
+  if (!vision_data.ok()) {
+    // Text-only prefill.
+    return absl::OkStatus();
+  }
+  auto copy_rows = [](const TensorBuffer& buffer, std::vector<float>& out,
+                      int& width) -> absl::Status {
+    LITERT_ASSIGN_OR_RETURN(auto type, buffer.TensorType());
+    const auto& dims = type.Layout().Dimensions();
+    RET_CHECK_GE(dims.size(), 3) << "Expected [1, num_tokens, ...].";
+    width = 1;
+    for (int i = 2; i < dims.size(); ++i) width *= dims[i];
+    LITERT_ASSIGN_OR_RETURN(
+        auto lock, TensorBufferScopedLock::Create<const float>(
+                       const_cast<TensorBuffer&>(buffer),
+                       TensorBuffer::LockMode::kRead));
+    out.assign(lock.second, lock.second + dims[1] * width);
+    return absl::OkStatus();
+  };
+  if (signatures_.input_mrope_positions.has_value()) {
+    ABSL_ASSIGN_OR_RETURN(const TensorBuffer* offsets,
+                          (*vision_data)->GetMropeOffsetsPtr());
+    int width = 0;
+    ABSL_RETURN_IF_ERROR(copy_rows(*offsets, vision_mrope_offsets_, width));
+    RET_CHECK_EQ(width, 3) << "M-RoPE offsets must be [1, num_tokens, 3].";
+  }
+  if (signatures_.input_deepstack_embeddings.has_value()) {
+    ABSL_ASSIGN_OR_RETURN(const TensorBuffer* deepstack,
+                          (*vision_data)->GetDeepstackEmbeddingsPtr());
+    ABSL_RETURN_IF_ERROR(
+        copy_rows(*deepstack, vision_deepstack_, vision_deepstack_width_));
+  }
+  return absl::OkStatus();
+}
+
+void LlmLiteRtCompiledModelExecutorBase::ClearVisionTokenExtras() {
+  vision_deepstack_.clear();
+  vision_deepstack_width_ = 0;
+  vision_mrope_offsets_.clear();
+  next_vision_token_ = 0;
+}
+
+absl::Status LlmLiteRtCompiledModelExecutorBase::NextTokenExtras(
+    int token_id, int step, std::array<int32_t, 3>& mrope_position,
+    absl::Span<const float>& deepstack) {
+  deepstack = {};
+  RuntimeState& state = llm_context_->runtime_state();
+  if (token_id != ExecutorVisionData::kSpecialToken) {
+    if (state.mrope_in_image) {
+      // The image ended: text continues after the image's M-RoPE span.
+      state.mrope_delta += state.mrope_image_span - state.mrope_image_tokens;
+      state.mrope_in_image = false;
+    }
+    mrope_position.fill(step + state.mrope_delta);
+    return absl::OkStatus();
+  }
+
+  const int index = next_vision_token_++;
+  if (!state.mrope_in_image) {
+    state.mrope_in_image = true;
+    state.mrope_image_start = step + state.mrope_delta;
+    state.mrope_image_span = 0;
+    state.mrope_image_tokens = 0;
+  }
+  if (signatures_.input_mrope_positions.has_value()) {
+    RET_CHECK_LT(index * 3, vision_mrope_offsets_.size())
+        << "More vision tokens than M-RoPE offsets.";
+    for (int axis = 0; axis < 3; ++axis) {
+      const int offset =
+          static_cast<int>(vision_mrope_offsets_[index * 3 + axis]);
+      mrope_position[axis] = state.mrope_image_start + offset;
+      state.mrope_image_span = std::max(state.mrope_image_span, offset + 1);
+    }
+  } else {
+    mrope_position.fill(step + state.mrope_delta);
+  }
+  ++state.mrope_image_tokens;
+  if (signatures_.input_deepstack_embeddings.has_value()) {
+    const size_t begin = static_cast<size_t>(index) * vision_deepstack_width_;
+    RET_CHECK_LE(begin + vision_deepstack_width_, vision_deepstack_.size())
+        << "More vision tokens than DeepStack features.";
+    deepstack = absl::MakeConstSpan(vision_deepstack_)
+                    .subspan(begin, vision_deepstack_width_);
+  }
+  return absl::OkStatus();
+}
+
 absl::Status LlmLiteRtCompiledModelExecutorBase::PrefillInternal(
     absl::string_view prefill_signature,
     absl::flat_hash_map<absl::string_view, TensorBuffer>& prefill_input_buffers,
@@ -571,9 +676,68 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::PrefillInternal(
     // If there is no pending input token and no input token to prefill, we can
     // skip the prefill by storing the token as a pending input token.
     bool skip_prefill = !has_pending_input_token && prefill_length == 0;
+    // M-RoPE positions ([3, T]) and DeepStack features ([1, T, layers * dim])
+    // of this chunk, collected per token and written to the input buffers
+    // after all tokens are assigned. Unused columns stay zero.
+    const bool use_vision_token_extras =
+        signatures_.input_mrope_positions.has_value() ||
+        signatures_.input_deepstack_embeddings.has_value();
+    std::vector<int32_t> mrope_positions;
+    int mrope_stride = 0;
+    std::vector<float> deepstack_embeddings;
+    int deepstack_width = 0;
+    if (!skip_prefill && signatures_.input_mrope_positions.has_value()) {
+      LITERT_ASSIGN_OR_RETURN(
+          auto size,
+          prefill_input_buffers[*signatures_.input_mrope_positions]
+              .PackedSize());
+      mrope_positions.assign(size / sizeof(int32_t), 0);
+      mrope_stride = mrope_positions.size() / 3;
+    }
+    if (!skip_prefill && signatures_.input_deepstack_embeddings.has_value()) {
+      LITERT_ASSIGN_OR_RETURN(
+          auto size,
+          prefill_input_buffers[*signatures_.input_deepstack_embeddings]
+              .PackedSize());
+      deepstack_embeddings.assign(size / sizeof(float), 0.0f);
+      deepstack_width = deepstack_embeddings.size() /
+                        std::max<size_t>(prefill_input_pos_size /
+                                             sizeof(int32_t),
+                                         1);
+    }
+    auto set_token_extras =
+        [&](int column, const std::array<int32_t, 3>& position,
+            absl::Span<const float> deepstack) -> absl::Status {
+      if (!mrope_positions.empty()) {
+        RET_CHECK_LT(column, mrope_stride);
+        for (int axis = 0; axis < 3; ++axis) {
+          mrope_positions[axis * mrope_stride + column] = position[axis];
+        }
+      }
+      if (!deepstack_embeddings.empty() && !deepstack.empty()) {
+        RET_CHECK_EQ(deepstack.size(), deepstack_width)
+            << "DeepStack feature width does not match the model input.";
+        std::copy(deepstack.begin(), deepstack.end(),
+                  deepstack_embeddings.begin() + column * deepstack_width);
+      }
+      return absl::OkStatus();
+    };
     if (!skip_prefill) {
       int input_idx = 0;
       if (has_pending_input_token) {
+        if (use_vision_token_extras) {
+          const auto& token = pending_input_token[0];
+          std::array<int32_t, 3> position;
+          if (token->mrope_position().has_value()) {
+            position = *token->mrope_position();
+          } else {
+            absl::Span<const float> unused_deepstack;
+            ABSL_RETURN_IF_ERROR(NextTokenExtras(
+                token->id(), internal_start_step, position, unused_deepstack));
+          }
+          ABSL_RETURN_IF_ERROR(set_token_extras(
+              /*column=*/0, position, token->deepstack_embedding()));
+        }
         if (use_token_as_lookup) {
           ABSL_RETURN_IF_ERROR(FillInputBufferWithToken(
               pending_input_token,
@@ -599,11 +763,32 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::PrefillInternal(
         ++prefill_input_pos_ptr;
         ++input_idx;
       }
+      const int first_step = llm_context_->runtime_state().current_step;
       std::transform(prefill_input_pos_ptr,
                      prefill_input_pos_ptr + prefill_length,
                      prefill_input_pos_ptr, [&](int token) mutable {
                        return llm_context_->runtime_state().current_step++;
                      });
+      if (use_vision_token_extras) {
+        for (int i = 0; i < prefill_length; ++i) {
+          std::array<int32_t, 3> position;
+          absl::Span<const float> deepstack;
+          ABSL_RETURN_IF_ERROR(
+              NextTokenExtras(ids[i], first_step + i, position, deepstack));
+          ABSL_RETURN_IF_ERROR(
+              set_token_extras(input_idx + i, position, deepstack));
+        }
+        if (!mrope_positions.empty()) {
+          LITERT_RETURN_IF_ERROR(
+              prefill_input_buffers[*signatures_.input_mrope_positions]
+                  .Write<int32_t>(absl::MakeConstSpan(mrope_positions)));
+        }
+        if (!deepstack_embeddings.empty()) {
+          LITERT_RETURN_IF_ERROR(
+              prefill_input_buffers[*signatures_.input_deepstack_embeddings]
+                  .Write<float>(absl::MakeConstSpan(deepstack_embeddings)));
+        }
+      }
       std::vector<int> processed_input_tokens(ids.begin(),
                                               ids.begin() + prefill_length);
       llm_context_->processed_context().processed_tokens().AddProcessedTokens(
@@ -718,6 +903,18 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::PrefillInternal(
     // Add the last token of the current input as a pending input token, to be
     // used in the next prefill or decode.
     auto last_input_token = std::make_shared<TokenData>(ids.back());
+    if (use_vision_token_extras) {
+      // The pending token's step is assigned now, so assign its M-RoPE
+      // position and take its DeepStack features in order as well.
+      std::array<int32_t, 3> position;
+      absl::Span<const float> deepstack;
+      ABSL_RETURN_IF_ERROR(NextTokenExtras(
+          ids.back(), llm_context_->runtime_state().current_step, position,
+          deepstack));
+      last_input_token->set_mrope_position(position);
+      last_input_token->mutable_deepstack_embedding().assign(deepstack.begin(),
+                                                             deepstack.end());
+    }
     if (!use_token_as_lookup) {
       if (embedding_lookup_ != nullptr) {
         // Look up the embeddings for the last token so they can be used in the
@@ -1019,6 +1216,22 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::DecodeInternal(
         input_pos_ptr[i * offset] = step;
       }
     }
+  }
+
+  if (signatures_.input_mrope_positions.has_value()) {
+    RET_CHECK_EQ(token.size(), 1)
+        << "M-RoPE models support a single output head.";
+    std::array<int32_t, 3> position;
+    if (token[0]->mrope_position().has_value()) {
+      position = *token[0]->mrope_position();
+    } else {
+      absl::Span<const float> unused_deepstack;
+      ABSL_RETURN_IF_ERROR(
+          NextTokenExtras(token[0]->id(), step, position, unused_deepstack));
+    }
+    LITERT_RETURN_IF_ERROR(
+        decode_input_buffers_[*signatures_.input_mrope_positions]
+            .Write<int32_t>(absl::MakeConstSpan(position)));
   }
 
   if (signatures_.input_attn_mask.has_value()) {
@@ -1547,7 +1760,9 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::InitializeSampler(
   sampler_handles_input_ =
       sampler_handles_input && sampler_->CanHandleInput() &&
       runs_embedding_on_gpu && !signatures_.input_tokens.empty() &&
-      !signatures_.input_attn_mask_local.has_value();
+      !signatures_.input_attn_mask_local.has_value() &&
+      // M-RoPE positions are computed on the host each step.
+      !signatures_.input_mrope_positions.has_value();
   if (sampler_handles_input_) {
     ABSL_LOG(INFO) << "Sampler will handle decode input tensors.";
     if (!decode_prev_input_pos_) {
@@ -1694,7 +1909,13 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::SetCurrentStep(int new_step) {
 }
 
 absl::Status LlmLiteRtCompiledModelExecutorBase::Reset() {
-  llm_context_->runtime_state().current_step = 0;
+  RuntimeState& state = llm_context_->runtime_state();
+  state.current_step = 0;
+  state.mrope_delta = 0;
+  state.mrope_in_image = false;
+  state.mrope_image_start = 0;
+  state.mrope_image_span = 0;
+  state.mrope_image_tokens = 0;
   return absl::OkStatus();
 }
 
@@ -1790,6 +2011,7 @@ absl::Status LlmLiteRtCompiledModelExecutorStatic::Prefill(
   if (embedding_lookup_ != nullptr) {
     ABSL_RETURN_IF_ERROR(embedding_lookup_->UpdateMultiModalEmbeddings(inputs));
   }
+  ABSL_RETURN_IF_ERROR(LoadVisionTokenExtras(inputs));
 
   LITERT_ASSIGN_OR_RETURN(auto ids,
                           ReferTensorBufferAsSpan<int32_t>(*token_ids_buffer));
@@ -1843,6 +2065,7 @@ absl::Status LlmLiteRtCompiledModelExecutorStatic::Prefill(
   if (embedding_lookup_ != nullptr) {
     ABSL_RETURN_IF_ERROR(embedding_lookup_->CleanupMultiModalEmbeddings());
   }
+  ClearVisionTokenExtras();
 
   return absl::OkStatus();
 }
@@ -2115,10 +2338,12 @@ absl::Status LlmLiteRtCompiledModelExecutorDynamic::Prefill(
   if (embedding_lookup_ != nullptr) {
     ABSL_RETURN_IF_ERROR(embedding_lookup_->UpdateMultiModalEmbeddings(inputs));
   }
+  ABSL_RETURN_IF_ERROR(LoadVisionTokenExtras(inputs));
   auto cleanup = absl::MakeCleanup([this]() {
     if (embedding_lookup_ != nullptr) {
       embedding_lookup_->CleanupMultiModalEmbeddings().IgnoreError();
     }
+    ClearVisionTokenExtras();
   });
 
   LITERT_ASSIGN_OR_RETURN(auto token_ids_buffer, inputs.GetTextTokenIdsPtr());

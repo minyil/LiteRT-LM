@@ -15,6 +15,8 @@
 #include "runtime/util/executor_data_util.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -51,6 +53,75 @@ absl::StatusOr<::litert::TensorBuffer*> GetMutableEmbeddingsPtr(
 absl::StatusOr<::litert::TensorBuffer*> GetMutableEmbeddingsPtr(
     ExecutorAudioData& data) {
   return data.GetMutableProjectedAudioEmbeddingsPtr();
+}
+
+// Concatenates host tensors shaped [1, N_i, ...] along the token axis (dim 1)
+// into a single [1, sum(N_i), ...] tensor. Returns nullopt if no tensor is
+// present, and an error if only some of them are present.
+absl::StatusOr<std::optional<TensorBuffer>> ConcatenateAlongTokens(
+    const std::vector<const TensorBuffer*>& tensors) {
+  int present = 0;
+  for (const auto* tensor : tensors) present += tensor != nullptr;
+  if (present == 0) return std::nullopt;
+  if (present != tensors.size()) {
+    return absl::InvalidArgumentError(
+        "Either all or none of the vision data must carry this tensor.");
+  }
+  LITERT_ASSIGN_OR_RETURN(auto first_type, tensors[0]->TensorType());
+  ABSL_ASSIGN_OR_RETURN(auto dims, TensorBufferDims(*tensors[0]));
+  if (dims.size() < 2) {
+    return absl::InvalidArgumentError("Expected a token axis at dim 1.");
+  }
+  int total_tokens = 0;
+  size_t total_size = 0;
+  for (const auto* tensor : tensors) {
+    ABSL_ASSIGN_OR_RETURN(auto tensor_dims, TensorBufferDims(*tensor));
+    total_tokens += tensor_dims[1];
+    LITERT_ASSIGN_OR_RETURN(size_t size, tensor->PackedSize());
+    total_size += size;
+  }
+  dims[1] = total_tokens;
+  ::litert::RankedTensorType combined_type(
+      first_type.ElementType(),
+      Layout(Dimensions(std::vector<int32_t>(dims.begin(), dims.end()))));
+  LITERT_ASSIGN_OR_RETURN(
+      auto combined, TensorBuffer::CreateManagedHostMemory(combined_type,
+                                                           total_size));
+  LITERT_ASSIGN_OR_RETURN(auto combined_lock,
+                          ::litert::TensorBufferScopedLock::Create(
+                              combined, TensorBuffer::LockMode::kWrite));
+  char* dst = static_cast<char*>(combined_lock.second);
+  for (const auto* tensor : tensors) {
+    LITERT_ASSIGN_OR_RETURN(size_t size, tensor->PackedSize());
+    LITERT_ASSIGN_OR_RETURN(
+        auto lock, ::litert::TensorBufferScopedLock::Create(
+                       const_cast<TensorBuffer&>(*tensor),
+                       TensorBuffer::LockMode::kRead));
+    memcpy(dst, lock.second, size);
+    dst += size;
+  }
+  return std::optional<TensorBuffer>(std::move(combined));
+}
+
+// Combines the DeepStack features and M-RoPE offsets of several images.
+absl::Status CombineVisionExtras(
+    const std::vector<ExecutorVisionData>& executor_data,
+    ExecutorVisionData& combined) {
+  std::vector<const TensorBuffer*> deepstack;
+  std::vector<const TensorBuffer*> mrope_offsets;
+  for (const auto& data : executor_data) {
+    auto ds = data.GetDeepstackEmbeddingsPtr();
+    deepstack.push_back(ds.ok() ? *ds : nullptr);
+    auto offsets = data.GetMropeOffsetsPtr();
+    mrope_offsets.push_back(offsets.ok() ? *offsets : nullptr);
+  }
+  ABSL_ASSIGN_OR_RETURN(auto combined_deepstack,
+                        ConcatenateAlongTokens(deepstack));
+  combined.SetDeepstackEmbeddings(std::move(combined_deepstack));
+  ABSL_ASSIGN_OR_RETURN(auto combined_offsets,
+                        ConcatenateAlongTokens(mrope_offsets));
+  combined.SetMropeOffsets(std::move(combined_offsets));
+  return absl::OkStatus();
 }
 
 template <typename T>
@@ -125,8 +196,10 @@ absl::StatusOr<T> CombineExecutorDataImpl(std::vector<T>& executor_data) {
     combined_tensor_buffer_ptr += embeddings_size;
   }
   if constexpr (std::is_same_v<T, ExecutorVisionData>) {
-    return ExecutorVisionData(std::move(combined_tensor_buffer),
-                              /*per_layer_embeddings=*/std::nullopt);
+    ExecutorVisionData combined(std::move(combined_tensor_buffer),
+                                /*per_layer_embeddings=*/std::nullopt);
+    ABSL_RETURN_IF_ERROR(CombineVisionExtras(executor_data, combined));
+    return combined;
   } else if constexpr (std::is_same_v<T, ExecutorAudioData>) {
     int num_audio_tokens = 0;
     for (const auto& executor_data : executor_data) {

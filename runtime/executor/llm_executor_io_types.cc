@@ -104,6 +104,33 @@ void ExecutorVisionData::SetPerLayerEmbeddings(
   per_layer_embeddings_ = std::move(per_layer_embeddings);
 }
 
+absl::StatusOr<const ::litert::TensorBuffer*>
+ExecutorVisionData::GetDeepstackEmbeddingsPtr() const {
+  if (deepstack_embeddings_.has_value()) {
+    return &deepstack_embeddings_.value();
+  }
+  return absl::NotFoundError(
+      "ExecutorVisionData::deepstack_embeddings_ is not set.");
+}
+
+absl::StatusOr<const ::litert::TensorBuffer*>
+ExecutorVisionData::GetMropeOffsetsPtr() const {
+  if (mrope_offsets_.has_value()) {
+    return &mrope_offsets_.value();
+  }
+  return absl::NotFoundError("ExecutorVisionData::mrope_offsets_ is not set.");
+}
+
+void ExecutorVisionData::SetDeepstackEmbeddings(
+    std::optional<::litert::TensorBuffer>&& deepstack_embeddings) {
+  deepstack_embeddings_ = std::move(deepstack_embeddings);
+}
+
+void ExecutorVisionData::SetMropeOffsets(
+    std::optional<::litert::TensorBuffer>&& mrope_offsets) {
+  mrope_offsets_ = std::move(mrope_offsets);
+}
+
 // Helper function to print a field from StatusOr<const TensorBuffer*>
 static void PrintOptionalTensorBufferFieldFromStatusOr(
     std::ostream& os, const std::string& field_name,
@@ -136,6 +163,17 @@ absl::StatusOr<ExecutorVisionData> ExecutorVisionData::Duplicate() const {
     duplicated_vision_data.SetPerLayerEmbeddings(
         std::move(per_layer_embeddings_duplicate));
   }
+  if (deepstack_embeddings_.has_value()) {
+    LITERT_ASSIGN_OR_RETURN(::litert::TensorBuffer deepstack_duplicate,
+                            deepstack_embeddings_->Duplicate());
+    duplicated_vision_data.SetDeepstackEmbeddings(
+        std::move(deepstack_duplicate));
+  }
+  if (mrope_offsets_.has_value()) {
+    LITERT_ASSIGN_OR_RETURN(::litert::TensorBuffer mrope_offsets_duplicate,
+                            mrope_offsets_->Duplicate());
+    duplicated_vision_data.SetMropeOffsets(std::move(mrope_offsets_duplicate));
+  }
   return duplicated_vision_data;
 }
 
@@ -148,6 +186,13 @@ std::ostream& operator<<(std::ostream& os,
   PrintOptionalTensorBufferFieldFromStatusOr(
       os, "PerLayerEmbeddings", vision_data.GetPerLayerEmbeddingsPtr(),
       kFieldIndent);
+  os << "\n";
+  PrintOptionalTensorBufferFieldFromStatusOr(
+      os, "DeepstackEmbeddings", vision_data.GetDeepstackEmbeddingsPtr(),
+      kFieldIndent);
+  os << "\n";
+  PrintOptionalTensorBufferFieldFromStatusOr(
+      os, "MropeOffsets", vision_data.GetMropeOffsetsPtr(), kFieldIndent);
   os << "\n"
      << "}";
   return os;

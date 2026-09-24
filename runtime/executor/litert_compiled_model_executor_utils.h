@@ -80,6 +80,14 @@ struct ModelSignatures {
   std::optional<std::string> input_per_layer_embeddings;
   // Input int32 param signature name. For both prefill and decode.
   std::optional<std::string> input_int32_param;
+  // Input M-RoPE positions signature name, int32 [3, T] (t, h, w), for models
+  // with multimodal RoPE (e.g. Qwen3-VL). For both prefill and decode. The
+  // regular positions input then only indexes the KV cache.
+  std::optional<std::string> input_mrope_positions;
+  // Input DeepStack embeddings signature name, float [1, T, layers, dim], for
+  // models that inject vision features into early decoder layers (e.g.
+  // Qwen3-VL). Prefill only; zeros at text positions.
+  std::optional<std::string> input_deepstack_embeddings;
   // Output logits signature name. Necessary for decode.
   std::string output_logits;
 };

@@ -84,6 +84,22 @@ struct RuntimeState {
   // This is only used by the compiled model executor to determine whether
   // KVCache preparation for prefill or decode should be done.
   bool ran_decode = false;
+
+  // Multimodal RoPE (M-RoPE, e.g. Qwen3-VL) bookkeeping. Only used when the
+  // model has an `mrope_pos` input. Text tokens use position
+  // `step + mrope_delta` on all three axes. The tokens of an image use
+  // `image_start + (t, h, w) offset`, and when the image ends, the next text
+  // position continues at `image_start + image_span`, i.e. `mrope_delta` grows
+  // by `image_span - number_of_image_tokens`.
+  int mrope_delta = 0;
+  // Whether the last positioned token was an image token.
+  bool mrope_in_image = false;
+  // M-RoPE position of the first token of the current image.
+  int mrope_image_start = 0;
+  // 1 + the largest offset seen so far in the current image.
+  int mrope_image_span = 0;
+  // Number of tokens of the current image positioned so far.
+  int mrope_image_tokens = 0;
 };
 
 // A resource interface to hold the llm context.
@@ -234,6 +250,19 @@ class ExecutorVisionData {
       std::optional<::litert::TensorBuffer>&& embeddings,
       std::optional<::litert::TensorBuffer>&& per_layer_embeddings);
 
+  // Optional DeepStack features (e.g. Qwen3-VL) with shape
+  // [1, vision_tokens_num, num_deepstack_layers, model_dimension], i.e. token
+  // major. They are added to the decoder hidden states of the first
+  // num_deepstack_layers layers at the vision token positions.
+  // Optional M-RoPE offsets with shape [1, vision_tokens_num, 3]: the float
+  // (t, h, w) offset of every vision token from the image's first position.
+  absl::StatusOr<const ::litert::TensorBuffer*> GetDeepstackEmbeddingsPtr()
+      const;
+  absl::StatusOr<const ::litert::TensorBuffer*> GetMropeOffsetsPtr() const;
+  void SetDeepstackEmbeddings(
+      std::optional<::litert::TensorBuffer>&& deepstack_embeddings);
+  void SetMropeOffsets(std::optional<::litert::TensorBuffer>&& mrope_offsets);
+
   // Getters:
   absl::StatusOr<const ::litert::TensorBuffer*> GetEmbeddingsPtr() const;
   absl::StatusOr<::litert::TensorBuffer*> GetMutableEmbeddingsPtr();
@@ -254,6 +283,8 @@ class ExecutorVisionData {
  private:
   std::optional<::litert::TensorBuffer> embeddings_;
   std::optional<::litert::TensorBuffer> per_layer_embeddings_;
+  std::optional<::litert::TensorBuffer> deepstack_embeddings_;
+  std::optional<::litert::TensorBuffer> mrope_offsets_;
 };
 std::ostream& operator<<(std::ostream& os,
                          const ExecutorVisionData& vision_data);
