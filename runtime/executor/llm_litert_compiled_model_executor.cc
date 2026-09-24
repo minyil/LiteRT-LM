@@ -297,6 +297,25 @@ GetPerLayerEmbeddingsFromInputs(const ExecutorInputs& inputs) {
   return absl::NotFoundError("No per-layer embeddings found in inputs.");
 }
 
+// Signatures are parsed from the decode signature, which lacks prefill-only
+// inputs such as DeepStack embeddings; take those from a prefill signature.
+absl::Status AddPrefillOnlyInputs(const Model& model,
+                                  ModelSignatures& signatures) {
+  for (int i = 0; i < model.GetNumSignatures(); ++i) {
+    LITERT_ASSIGN_OR_RETURN(auto signature, model.GetSignature(i));
+    if (!absl::StartsWith(signature.Key(), kPrefillSignatureRunner)) continue;
+    ABSL_ASSIGN_OR_RETURN(
+        ModelSignatures prefill_signatures,
+        GetModelSignaturesFromInputOutputNames(signature.InputNames(),
+                                               signature.OutputNames(),
+                                               /*strict=*/false));
+    signatures.input_deepstack_embeddings =
+        prefill_signatures.input_deepstack_embeddings;
+    break;
+  }
+  return absl::OkStatus();
+}
+
 }  // namespace
 
 absl::Status LlmLiteRtCompiledModelExecutorBase::CreatePrefillInputBuffers(
@@ -2126,6 +2145,7 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
       ModelSignatures signatures,
       GetModelSignaturesFromInputOutputNames(decode_signature.InputNames(),
                                              decode_signature.OutputNames()));
+  ABSL_RETURN_IF_ERROR(AddPrefillOnlyInputs(*litert_model, signatures));
 
   LITERT_ASSIGN_OR_RETURN(
       auto compilation_options,
@@ -2506,6 +2526,7 @@ LlmLiteRtCompiledModelExecutorDynamic::Create(
       ModelSignatures signatures,
       GetModelSignaturesFromInputOutputNames(decode_signature.InputNames(),
                                              decode_signature.OutputNames()));
+  ABSL_RETURN_IF_ERROR(AddPrefillOnlyInputs(*litert_model, signatures));
 
   LITERT_ASSIGN_OR_RETURN(
       const SimpleTensor& output_logits_tensor,
