@@ -599,35 +599,20 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::NextTokenExtras(
   deepstack = {};
   RuntimeState& state = llm_context_->runtime_state();
   if (token_id != ExecutorVisionData::kSpecialToken) {
-    if (state.mrope_in_image) {
-      // The image ended: text continues after the image's M-RoPE span.
-      state.mrope_delta += state.mrope_image_span - state.mrope_image_tokens;
-      state.mrope_in_image = false;
-    }
-    mrope_position.fill(step + state.mrope_delta);
+    mrope_position = NextMropePosition(state, step, std::nullopt);
     return absl::OkStatus();
   }
 
   const int index = next_vision_token_++;
-  if (!state.mrope_in_image) {
-    state.mrope_in_image = true;
-    state.mrope_image_start = step + state.mrope_delta;
-    state.mrope_image_span = 0;
-    state.mrope_image_tokens = 0;
-  }
+  std::array<int32_t, 3> offset = {0, 0, 0};
   if (signatures_.input_mrope_positions.has_value()) {
     RET_CHECK_LT(index * 3, vision_mrope_offsets_.size())
         << "More vision tokens than M-RoPE offsets.";
     for (int axis = 0; axis < 3; ++axis) {
-      const int offset =
-          static_cast<int>(vision_mrope_offsets_[index * 3 + axis]);
-      mrope_position[axis] = state.mrope_image_start + offset;
-      state.mrope_image_span = std::max(state.mrope_image_span, offset + 1);
+      offset[axis] = static_cast<int>(vision_mrope_offsets_[index * 3 + axis]);
     }
-  } else {
-    mrope_position.fill(step + state.mrope_delta);
   }
-  ++state.mrope_image_tokens;
+  mrope_position = NextMropePosition(state, step, offset);
   if (signatures_.input_deepstack_embeddings.has_value()) {
     const size_t begin = static_cast<size_t>(index) * vision_deepstack_width_;
     RET_CHECK_LE(begin + vision_deepstack_width_, vision_deepstack_.size())

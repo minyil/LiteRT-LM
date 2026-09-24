@@ -287,5 +287,94 @@ TEST(ExecutorDataUtilTest, CombineExecutorVisionDataMultiSuccess) {
                           11.0, 12.0));
 }
 
+TEST(ExecutorDataUtilTest, CombineExecutorVisionDataConcatenatesExtras) {
+  // Two images with 1 and 2 vision tokens; DeepStack [1, N, 2 layers, 1 dim].
+  std::vector<ExecutorVisionData> vision_data_list;
+  const std::vector<std::vector<float>> deepstack = {{1, 2}, {3, 4, 5, 6}};
+  const std::vector<std::vector<float>> offsets = {{0, 0, 0},
+                                                   {0, 0, 0, 0, 0, 1}};
+  for (int i = 0; i < 2; ++i) {
+    const int tokens = i + 1;
+    std::vector<float> embeddings(tokens * 2, i);
+    LITERT_ASSERT_OK_AND_ASSIGN(
+        auto embeddings_buffer,
+        CopyToTensorBuffer<float>(embeddings, {1, tokens, 2}));
+    LITERT_ASSERT_OK_AND_ASSIGN(
+        auto deepstack_buffer,
+        CopyToTensorBuffer<float>(deepstack[i], {1, tokens, 2, 1}));
+    LITERT_ASSERT_OK_AND_ASSIGN(
+        auto offsets_buffer,
+        CopyToTensorBuffer<float>(offsets[i], {1, tokens, 3}));
+    ExecutorVisionData vision_data(std::move(embeddings_buffer),
+                                   /*per_layer_embeddings=*/std::nullopt);
+    vision_data.SetDeepstackEmbeddings(std::move(deepstack_buffer));
+    vision_data.SetMropeOffsets(std::move(offsets_buffer));
+    vision_data_list.push_back(std::move(vision_data));
+  }
+
+  ASSERT_OK_AND_ASSIGN(auto combined,
+                       CombineExecutorVisionData(vision_data_list));
+  ASSERT_OK_AND_ASSIGN(const TensorBuffer* combined_deepstack,
+                       combined.GetDeepstackEmbeddingsPtr());
+  ASSERT_OK_AND_ASSIGN(auto deepstack_dims,
+                       TensorBufferDims(*combined_deepstack));
+  EXPECT_THAT(deepstack_dims, ElementsAre(1, 3, 2, 1));
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto deepstack_span, ReferTensorBufferAsSpan<float>(*combined_deepstack));
+  EXPECT_THAT(std::vector<float>(deepstack_span.begin(), deepstack_span.end()),
+              ElementsAre(1, 2, 3, 4, 5, 6));
+  ASSERT_OK_AND_ASSIGN(const TensorBuffer* combined_offsets,
+                       combined.GetMropeOffsetsPtr());
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto offsets_span, ReferTensorBufferAsSpan<float>(*combined_offsets));
+  EXPECT_THAT(std::vector<float>(offsets_span.begin(), offsets_span.end()),
+              ElementsAre(0, 0, 0, 0, 0, 0, 0, 0, 1));
+}
+
+TEST(ExecutorDataUtilTest, CombineExecutorVisionDataRejectsPartialExtras) {
+  std::vector<ExecutorVisionData> vision_data_list;
+  for (int i = 0; i < 2; ++i) {
+    LITERT_ASSERT_OK_AND_ASSIGN(auto embeddings_buffer,
+                                CopyToTensorBuffer<float>({1, 2}, {1, 1, 2}));
+    ExecutorVisionData vision_data(std::move(embeddings_buffer),
+                                   /*per_layer_embeddings=*/std::nullopt);
+    if (i == 0) {
+      LITERT_ASSERT_OK_AND_ASSIGN(auto offsets_buffer,
+                                  CopyToTensorBuffer<float>({0, 0, 0}, {1, 1, 3}));
+      vision_data.SetMropeOffsets(std::move(offsets_buffer));
+    }
+    vision_data_list.push_back(std::move(vision_data));
+  }
+  EXPECT_THAT(CombineExecutorVisionData(vision_data_list).status(),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
+TEST(ExecutorDataUtilTest, DuplicateKeepsDeepstackAndMropeOffsets) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto embeddings_buffer,
+                              CopyToTensorBuffer<float>({1, 2}, {1, 1, 2}));
+  ExecutorVisionData vision_data(std::move(embeddings_buffer),
+                                 /*per_layer_embeddings=*/std::nullopt);
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto deepstack_buffer, CopyToTensorBuffer<float>({7, 8}, {1, 1, 2, 1}));
+  LITERT_ASSERT_OK_AND_ASSIGN(auto offsets_buffer,
+                              CopyToTensorBuffer<float>({0, 1, 2}, {1, 1, 3}));
+  vision_data.SetDeepstackEmbeddings(std::move(deepstack_buffer));
+  vision_data.SetMropeOffsets(std::move(offsets_buffer));
+
+  ASSERT_OK_AND_ASSIGN(ExecutorVisionData duplicate, vision_data.Duplicate());
+  ASSERT_OK_AND_ASSIGN(const TensorBuffer* deepstack,
+                       duplicate.GetDeepstackEmbeddingsPtr());
+  LITERT_ASSERT_OK_AND_ASSIGN(auto deepstack_span,
+                              ReferTensorBufferAsSpan<float>(*deepstack));
+  EXPECT_THAT(std::vector<float>(deepstack_span.begin(), deepstack_span.end()),
+              ElementsAre(7, 8));
+  ASSERT_OK_AND_ASSIGN(const TensorBuffer* offsets,
+                       duplicate.GetMropeOffsetsPtr());
+  LITERT_ASSERT_OK_AND_ASSIGN(auto offsets_span,
+                              ReferTensorBufferAsSpan<float>(*offsets));
+  EXPECT_THAT(std::vector<float>(offsets_span.begin(), offsets_span.end()),
+              ElementsAre(0, 1, 2));
+}
+
 }  // namespace
 }  // namespace litert::lm

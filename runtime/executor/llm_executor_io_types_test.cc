@@ -14,6 +14,7 @@
 
 #include "runtime/executor/llm_executor_io_types.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -940,6 +941,53 @@ TEST(LlmExecutorIoTypesTest, ExecutorAudioDataDuplicate) {
   ASSERT_FALSE(duplicate_empty.GetProjectedAudioEmbeddingsPtr().ok());
   ASSERT_FALSE(duplicate_empty.GetAudioEmbeddingsPtr().ok());
   ASSERT_FALSE(duplicate_empty.GetPerLayerEmbeddingsPtr().ok());
+}
+
+// Positions follow HF Qwen3-VL get_rope_index: text uses step + delta on all
+// axes, an image's tokens use start + (t, h, w) offset, and the text after an
+// image continues at start + max(grid_h, grid_w).
+TEST(NextMropePositionTest, TextOnlyUsesStep) {
+  RuntimeState state;
+  for (int step = 0; step < 5; ++step) {
+    EXPECT_THAT(NextMropePosition(state, step, std::nullopt),
+                ::testing::ElementsAre(step, step, step));
+  }
+  EXPECT_EQ(state.mrope_delta, 0);
+}
+
+TEST(NextMropePositionTest, ImagesShiftFollowingText) {
+  RuntimeState state;
+  // Text at steps 0..3.
+  for (int step = 0; step < 4; ++step) {
+    NextMropePosition(state, step, std::nullopt);
+  }
+  // A 2x3 image at steps 4..9 starts at position 4.
+  int step = 4;
+  for (int h = 0; h < 2; ++h) {
+    for (int w = 0; w < 3; ++w) {
+      EXPECT_THAT(NextMropePosition(state, step++,
+                                    std::array<int32_t, 3>{0, h, w}),
+                  ::testing::ElementsAre(4, 4 + h, 4 + w));
+    }
+  }
+  // Text continues at 4 + max(2, 3) = 7, so the delta is 7 - 10 = -3.
+  EXPECT_THAT(NextMropePosition(state, step++, std::nullopt),
+              ::testing::ElementsAre(7, 7, 7));
+  EXPECT_EQ(state.mrope_delta, -3);
+
+  // A 2x2 image at steps 11..14 starts at position 11 - 3 = 8.
+  for (int h = 0; h < 2; ++h) {
+    for (int w = 0; w < 2; ++w) {
+      EXPECT_THAT(NextMropePosition(state, step++,
+                                    std::array<int32_t, 3>{0, h, w}),
+                  ::testing::ElementsAre(8, 8 + h, 8 + w));
+    }
+  }
+  // Text continues at 8 + 2 = 10.
+  EXPECT_THAT(NextMropePosition(state, step++, std::nullopt),
+              ::testing::ElementsAre(10, 10, 10));
+  EXPECT_EQ(state.mrope_delta, -5);
+  EXPECT_FALSE(state.mrope_in_image);
 }
 
 }  // namespace

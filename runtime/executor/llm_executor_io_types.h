@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_IO_TYPES_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_IO_TYPES_H_
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -101,6 +102,15 @@ struct RuntimeState {
   // Number of tokens of the current image positioned so far.
   int mrope_image_tokens = 0;
 };
+
+// Returns the M-RoPE (t, h, w) position of the token processed at `step` and
+// updates the M-RoPE bookkeeping in `state`. `vision_offset` is the (t, h, w)
+// offset of a vision token from its image's first position, or nullopt for a
+// text token. Tokens must be passed in processing order; consecutive vision
+// tokens form one image.
+std::array<int32_t, 3> NextMropePosition(
+    RuntimeState& state, int step,
+    const std::optional<std::array<int32_t, 3>>& vision_offset);
 
 // A resource interface to hold the llm context.
 class LlmContext {

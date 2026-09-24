@@ -14,6 +14,8 @@
 
 #include "runtime/executor/llm_executor_io_types.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <ios>
 #include <optional>
@@ -102,6 +104,34 @@ void ExecutorVisionData::SetEmbeddings(
 void ExecutorVisionData::SetPerLayerEmbeddings(
     std::optional<::litert::TensorBuffer>&& per_layer_embeddings) {
   per_layer_embeddings_ = std::move(per_layer_embeddings);
+}
+
+std::array<int32_t, 3> NextMropePosition(
+    RuntimeState& state, int step,
+    const std::optional<std::array<int32_t, 3>>& vision_offset) {
+  std::array<int32_t, 3> position;
+  if (!vision_offset.has_value()) {
+    if (state.mrope_in_image) {
+      // The image ended: text continues after the image's M-RoPE span.
+      state.mrope_delta += state.mrope_image_span - state.mrope_image_tokens;
+      state.mrope_in_image = false;
+    }
+    position.fill(step + state.mrope_delta);
+    return position;
+  }
+  if (!state.mrope_in_image) {
+    state.mrope_in_image = true;
+    state.mrope_image_start = step + state.mrope_delta;
+    state.mrope_image_span = 0;
+    state.mrope_image_tokens = 0;
+  }
+  for (int axis = 0; axis < 3; ++axis) {
+    const int offset = (*vision_offset)[axis];
+    position[axis] = state.mrope_image_start + offset;
+    state.mrope_image_span = std::max(state.mrope_image_span, offset + 1);
+  }
+  ++state.mrope_image_tokens;
+  return position;
 }
 
 absl::StatusOr<const ::litert::TensorBuffer*>
