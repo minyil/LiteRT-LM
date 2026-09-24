@@ -217,14 +217,19 @@ std::ostream& operator<<(std::ostream& os,
       os, "PerLayerEmbeddings", vision_data.GetPerLayerEmbeddingsPtr(),
       kFieldIndent);
   os << "\n";
-  PrintOptionalTensorBufferFieldFromStatusOr(
-      os, "DeepstackEmbeddings", vision_data.GetDeepstackEmbeddingsPtr(),
-      kFieldIndent);
-  os << "\n";
-  PrintOptionalTensorBufferFieldFromStatusOr(
-      os, "MropeOffsets", vision_data.GetMropeOffsetsPtr(), kFieldIndent);
-  os << "\n"
-     << "}";
+  // Model-specific extras are only printed when present.
+  if (vision_data.GetDeepstackEmbeddingsPtr().ok()) {
+    PrintOptionalTensorBufferFieldFromStatusOr(
+        os, "DeepstackEmbeddings", vision_data.GetDeepstackEmbeddingsPtr(),
+        kFieldIndent);
+    os << "\n";
+  }
+  if (vision_data.GetMropeOffsetsPtr().ok()) {
+    PrintOptionalTensorBufferFieldFromStatusOr(
+        os, "MropeOffsets", vision_data.GetMropeOffsetsPtr(), kFieldIndent);
+    os << "\n";
+  }
+  os << "}";
   return os;
 }
 
