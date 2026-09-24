@@ -17,9 +17,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
@@ -88,6 +90,46 @@ absl::StatusOr<std::pair<int, int>> GetAspectRatioPreservingSize(
   }
 
   return std::make_pair(target_height, target_width);
+}
+
+absl::StatusOr<std::pair<int, int>> SelectTargetSize(
+    int image_height, int image_width,
+    const std::vector<std::pair<int, int>>& candidates) {
+  if (candidates.empty()) {
+    return absl::InvalidArgumentError("No candidate target sizes.");
+  }
+  if (image_height <= 0 || image_width <= 0) {
+    return absl::InvalidArgumentError("Image size must be positive.");
+  }
+  const double image_log_aspect =
+      std::log(static_cast<double>(image_height) / image_width);
+  auto aspect_distance = [&](const std::pair<int, int>& size) {
+    return std::abs(std::log(static_cast<double>(size.first) / size.second) -
+                    image_log_aspect);
+  };
+  double best_distance = std::numeric_limits<double>::max();
+  for (const auto& size : candidates) {
+    best_distance = std::min(best_distance, aspect_distance(size));
+  }
+  // Candidates within a small tolerance of the best aspect ratio.
+  constexpr double kAspectTolerance = 1e-3;
+  const int64_t image_area = static_cast<int64_t>(image_height) * image_width;
+  std::optional<std::pair<int, int>> largest_fitting;
+  std::optional<std::pair<int, int>> smallest;
+  auto area = [](const std::pair<int, int>& size) {
+    return static_cast<int64_t>(size.first) * size.second;
+  };
+  for (const auto& size : candidates) {
+    if (aspect_distance(size) > best_distance + kAspectTolerance) continue;
+    if (area(size) <= image_area &&
+        (!largest_fitting || area(size) > area(*largest_fitting))) {
+      largest_fitting = size;
+    }
+    if (!smallest || area(size) < area(*smallest)) {
+      smallest = size;
+    }
+  }
+  return largest_fitting ? *largest_fitting : *smallest;
 }
 
 absl::StatusOr<InputImage> PatchifyImage(

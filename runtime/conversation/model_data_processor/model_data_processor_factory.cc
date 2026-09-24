@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -326,6 +327,14 @@ absl::StatusOr<DataProcessorConfig> CreateGenericDataProcessorConfig(
     }
     multi_config.image_preprocess_parameter.SetTargetDimensions(
         Dimensions({1, height, width, 3}));
+    if (generic_model.image_tensor_sizes_size() > 0) {
+      std::vector<std::pair<int, int>> sizes;
+      for (const auto& size : generic_model.image_tensor_sizes()) {
+        sizes.emplace_back(size.height(), size.width());
+      }
+      multi_config.image_preprocess_parameter.SetCandidateTargetSizes(
+          std::move(sizes));
+    }
 
     // Patchify config
     if (generic_model.has_patch_width() || generic_model.has_patch_height() ||

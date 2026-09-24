@@ -532,27 +532,56 @@ absl::StatusOr<ExecutorVisionData> VisionLiteRtCompiledModelExecutor::Encode(
   ScopedLatency scoped_total_latency(latency_stats_);
   LITERT_ASSIGN_OR_RETURN(auto input_image_data,
                           ReferTensorBufferAsSpan<float>(input_image_tensor));
-  LITERT_RETURN_IF_ERROR(
-      vision_encoder_->GetMutableInputBuffers()[0].Write<float>(
-          input_image_data));
 
   if (vision_adapter_ == nullptr) {
+    // Fixed-size encoders may have one signature per image size; run the one
+    // whose input matches the preprocessed image.
+    const Model& model = vision_encoder_->GetModel();
+    int signature_index = 0;
+    if (model.GetNumSignatures() > 1) {
+      LITERT_ASSIGN_OR_RETURN(auto image_type, input_image_tensor.TensorType());
+      const auto& image_dims = image_type.Layout().Dimensions();
+      std::optional<int> matching_index;
+      for (int i = 0; i < model.GetNumSignatures() && !matching_index; ++i) {
+        LITERT_ASSIGN_OR_RETURN(auto input_type, model.GetInputTensorType(i, 0));
+        if (input_type.Layout().Dimensions() == image_dims) {
+          matching_index = i;
+        }
+      }
+      if (!matching_index.has_value()) {
+        return absl::InvalidArgumentError(
+            "No vision encoder signature matches the preprocessed image size.");
+      }
+      signature_index = *matching_index;
+    }
+    // Single-signature encoders keep reusing their preallocated inputs.
+    std::vector<TensorBuffer> signature_inputs;
+    std::vector<TensorBuffer>* encoder_inputs =
+        &vision_encoder_->GetMutableInputBuffers();
+    if (model.GetNumSignatures() > 1) {
+      LITERT_ASSIGN_OR_RETURN(
+          signature_inputs,
+          vision_encoder_->GetCompiledModel().CreateInputBuffers(
+              signature_index));
+      encoder_inputs = &signature_inputs;
+    }
+    LITERT_RETURN_IF_ERROR(
+        (*encoder_inputs)[0].Write<float>(input_image_data));
     LITERT_ASSIGN_OR_RETURN(
         auto encoder_outputs,
-        vision_encoder_->GetCompiledModel().CreateOutputBuffers(0));
+        vision_encoder_->GetCompiledModel().CreateOutputBuffers(
+            signature_index));
     {
       ScopedLatency scoped(latency_stats_, kVisionEncoderInferenceLatency);
       LITERT_RETURN_IF_ERROR(vision_encoder_->GetCompiledModel().Run(
-          /*input_buffers=*/vision_encoder_->GetInputBuffers(),
-          /*output_buffers=*/encoder_outputs));
+          signature_index, *encoder_inputs, encoder_outputs));
     }
     AccumulateStat(latency_stats_, kVisionNumImagesMetric, int64_t{1});
     // Encoders may have extra outputs besides the features (e.g. Qwen3-VL's
     // DeepStack features and M-RoPE offsets), so pick outputs by name. The
     // features fall back to the first output for single-output encoders.
-    LITERT_ASSIGN_OR_RETURN(
-        auto output_names,
-        vision_encoder_->GetModel().GetSignatureOutputNames(0));
+    LITERT_ASSIGN_OR_RETURN(auto output_names,
+                            model.GetSignatureOutputNames(signature_index));
     auto output_index = [&](absl::string_view name) -> int {
       for (int i = 0; i < output_names.size(); ++i) {
         if (output_names[i] == name) return i;
@@ -570,6 +599,10 @@ absl::StatusOr<ExecutorVisionData> VisionLiteRtCompiledModelExecutor::Encode(
     }
     return vision_data;
   }
+
+  LITERT_RETURN_IF_ERROR(
+      vision_encoder_->GetMutableInputBuffers()[0].Write<float>(
+          input_image_data));
 
   LITERT_ASSIGN_OR_RETURN(
       auto output_tensor_buffers,

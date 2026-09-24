@@ -143,6 +143,18 @@ message GenericModel {
   optional string audio_suffix = 40;
   // Whether to add the end of audio token after the audio in the prompt.
   optional bool add_audio_end = 41;
+
+  // Candidate image tensor sizes for vision encoders with one fixed-size
+  // signature per size (named `vision_{height}x{width}`). When set, each image
+  // is resized to the candidate closest to its aspect ratio, preferring the
+  // largest one that does not upscale the image, instead of to
+  // image_tensor_height x image_tensor_width.
+  repeated ImageTensorSize image_tensor_sizes = 42;
+}
+
+message ImageTensorSize {
+  optional int32 height = 1;
+  optional int32 width = 2;
 }
 
 // Google's Gemma3N model.

@@ -16,6 +16,7 @@
 #define THIRD_PARTY_ODML_LITERT_LM_SUPPORT_PREPROCESSOR_IMAGE_PREPROCESSOR_UTILS_H_
 
 #include <utility>
+#include <vector>
 
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
@@ -42,6 +43,17 @@ namespace litert::support {
 absl::StatusOr<std::pair<int, int>> GetAspectRatioPreservingSize(
     int width, int height,
     const ImagePreprocessParameter::PatchifyConfig& patchify_config);
+
+// Selects the size to resize an image to among `candidates` ({height, width}).
+// Prefers the candidates whose aspect ratio is closest to the image's; among
+// those, the largest one that does not exceed the image's area, or the
+// smallest one if all of them do (to avoid needless upscaling).
+//
+// returns:
+//   The selected {height, width}, or an error if there are no candidates.
+absl::StatusOr<std::pair<int, int>> SelectTargetSize(
+    int image_height, int image_width,
+    const std::vector<std::pair<int, int>>& candidates);
 
 // Patchify the image into a tensor buffer.
 //

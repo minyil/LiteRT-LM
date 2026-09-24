@@ -32,6 +32,7 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 using ::testing::Pair;
+using ::testing::status::IsOkAndHolds;
 using ::testing::status::StatusIs;
 
 TEST(GetAspectRatioPreservingSizeTest, SquareImageNoResize) {
@@ -575,6 +576,34 @@ TEST(ImagePreprocessorUtilsTest, PatchifyImageMergePatchesEmitPositionsFalse) {
   ASSERT_TRUE(images_tensor_type.HasValue());
   EXPECT_THAT(images_tensor_type.Value().Layout().Dimensions(),
               ElementsAre(1, 2, 48));
+}
+
+TEST(SelectTargetSizeTest, PrefersClosestAspectRatio) {
+  const std::vector<std::pair<int, int>> candidates = {
+      {448, 448}, {448, 672}, {672, 448}, {896, 896}};
+  // Landscape 3:2 -> the 448x672 (h x w) candidate.
+  EXPECT_THAT(SelectTargetSize(800, 1200, candidates),
+              IsOkAndHolds(std::make_pair(448, 672)));
+  // Portrait 3:2 -> the 672x448 candidate.
+  EXPECT_THAT(SelectTargetSize(1200, 800, candidates),
+              IsOkAndHolds(std::make_pair(672, 448)));
+}
+
+TEST(SelectTargetSizeTest, PrefersLargestSizeThatDoesNotUpscale) {
+  const std::vector<std::pair<int, int>> candidates = {
+      {448, 448}, {672, 672}, {896, 896}};
+  EXPECT_THAT(SelectTargetSize(1000, 1000, candidates),
+              IsOkAndHolds(std::make_pair(896, 896)));
+  EXPECT_THAT(SelectTargetSize(700, 700, candidates),
+              IsOkAndHolds(std::make_pair(672, 672)));
+  // Smaller than every candidate: use the smallest one.
+  EXPECT_THAT(SelectTargetSize(300, 300, candidates),
+              IsOkAndHolds(std::make_pair(448, 448)));
+}
+
+TEST(SelectTargetSizeTest, RejectsEmptyCandidates) {
+  EXPECT_THAT(SelectTargetSize(100, 100, {}),
+              StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
 }  // namespace

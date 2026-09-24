@@ -75,6 +75,16 @@ class ImagePreprocessParameter {
     patchify_config_ = patchify_config;
   }
 
+  // Candidate target sizes as {height, width}. When not empty, the
+  // preprocessor resizes each image to the candidate chosen by
+  // SelectTargetSize() instead of to the fixed target dimensions.
+  const std::vector<std::pair<int, int>>& GetCandidateTargetSizes() const {
+    return candidate_target_sizes_;
+  }
+  void SetCandidateTargetSizes(std::vector<std::pair<int, int>> sizes) {
+    candidate_target_sizes_ = std::move(sizes);
+  }
+
   // Gets the Normalization config for preprocessing.
   const std::optional<NormalizationConfig>& GetNormalizationConfig() const {
     return normalization_config_;
@@ -89,6 +99,7 @@ class ImagePreprocessParameter {
   Dimensions dimensions_;
   std::optional<PatchifyConfig> patchify_config_;
   std::optional<NormalizationConfig> normalization_config_;
+  std::vector<std::pair<int, int>> candidate_target_sizes_;
 };
 
 // A decoded image in 8-bit RGB, HWC (row-major, 3 interleaved channels)

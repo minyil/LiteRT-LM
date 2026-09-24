@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -168,10 +169,21 @@ absl::StatusOr<InputImage> StbImagePreprocessor::Preprocess(
     ABSL_RETURN_IF_ERROR(MaybeResizeImageWithSameAspectRatio(
         image_data, resized_image, updated_parameter));
   } else {
-    // Fixed target dimensions: resize directly to the requested size.
-    const int target_height = target_dimensions.at(1);
-    const int target_width = target_dimensions.at(2);
+    // Fixed target dimensions: resize directly to the requested size, or to
+    // the candidate size that best fits the image, if there are candidates.
+    int target_height = target_dimensions.at(1);
+    int target_width = target_dimensions.at(2);
     const int target_channels = target_dimensions.at(3);
+    if (!parameter.GetCandidateTargetSizes().empty()) {
+      ABSL_ASSIGN_OR_RETURN(
+          auto size,
+          SelectTargetSize(original_height, original_width,
+                           parameter.GetCandidateTargetSizes()));
+      std::tie(target_height, target_width) = size;
+      updated_parameter.SetTargetDimensions({target_dimensions.at(0),
+                                             target_height, target_width,
+                                             target_channels});
+    }
 
     resized_image.resize(static_cast<size_t>(target_width) * target_height *
                          target_channels);
