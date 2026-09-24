@@ -83,7 +83,7 @@ absl::StatusOr<std::optional<TensorBuffer>> ConcatenateAlongTokens(
   dims[1] = total_tokens;
   ::litert::RankedTensorType combined_type(
       first_type.ElementType(),
-      Layout(Dimensions(std::vector<int32_t>(dims.begin(), dims.end()))));
+      Layout(Dimensions(dims.begin(), dims.end())));
   LITERT_ASSIGN_OR_RETURN(
       auto combined, TensorBuffer::CreateManagedHostMemory(combined_type,
                                                            total_size));
