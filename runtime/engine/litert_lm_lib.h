@@ -88,6 +88,8 @@ struct LiteRtLmSettings {
   // this limit.
   int max_output_tokens = -1;
   int max_num_images = 0;
+  // Whether thinking models think before answering; unset keeps the default.
+  std::optional<bool> enable_thinking;
   int visual_token_budget = -1;
   absl::LogSeverity min_log_level = absl::LogSeverity::kInfo;
   std::set<int> prefill_batch_sizes;

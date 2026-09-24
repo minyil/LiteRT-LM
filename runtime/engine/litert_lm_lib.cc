@@ -65,6 +65,7 @@
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/gemma4_data_processor_config.h"
+#include "runtime/conversation/thinking_config.h"
 #include "runtime/engine/engine.h"
 #include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
@@ -1077,10 +1078,14 @@ absl::Status RunLiteRtLm(const LiteRtLmSettings& settings,
       }
     } else {
       ABSL_LOG(INFO) << "Creating conversation";
+      ConversationConfig::Builder conversation_config_builder;
+      conversation_config_builder.SetSessionConfig(session_config);
+      if (settings.enable_thinking.has_value()) {
+        conversation_config_builder.SetThinkingConfig(ThinkingConfig(
+            *settings.enable_thinking, /*thinking_token_budget=*/-1));
+      }
       ABSL_ASSIGN_OR_RETURN(auto conversation_config,
-                            ConversationConfig::Builder()
-                                .SetSessionConfig(session_config)
-                                .Build(*engine));
+                            conversation_config_builder.Build(*engine));
       ABSL_ASSIGN_OR_RETURN(conversation,
                             Conversation::Create(*engine, conversation_config));
       if (settings.multi_turns) {

@@ -198,6 +198,7 @@ cc_library(
         "//runtime/components/constrained_decoding:suppress_tokens_config",
         "//runtime/conversation",
         "//runtime/conversation:io_types",
+        "//runtime/conversation:thinking_config",
         "//runtime/conversation/model_data_processor:gemma4_data_processor_config",
         "//runtime/executor:executor_settings_base",
         "//runtime/executor:llm_executor_settings",
